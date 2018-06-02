@@ -5,7 +5,6 @@
 #include <avr/pgmspace.h>
 #include <avr/io.h> 
 #include <avr/interrupt.h>
-#define DDS_MULT_FACTOR 1369 // makes the lowest frequency 0.01Hz
 #define NOISE_PIN 8
 uint32_t lfsr = 1; //32 bit LFSR, must be non-zero to start
 
@@ -18,9 +17,10 @@ const char sine256[] PROGMEM = {
   33,35,37,39,42,44,46,49,51,54,56,59,62,64,67,70,73,76,78,81,84,87,90,93,96,99,102,105,108,111,115,118,121,124
 };
 
-volatile unsigned long phaccu;   // phase accumulator
-volatile unsigned long tword_m;  // dds tuning word m
-volatile byte icnt;              // var inside interrupt
+// LFO stuff
+uint32_t lfoPhaccu;   // phase accumulator
+uint32_t lfoTword_m;  // dds tuning word m
+uint8_t lfoCnt;      // var inside interrupt
 
 float lfoControlVoltage;
 float lfoFreq;
@@ -46,8 +46,8 @@ void setup() {
 
 void getLfoFreq() {
   // read ADC to calculate the required DDS tuning word, log scale between 0.01Hz and 10Hz approx
-  float lfoControlVoltage = analogRead(0) * 11/1024;
-  tword_m = DDS_MULT_FACTOR * pow(2.0, lfoControlVoltage);
+  float lfoControlVoltage = analogRead(0) * 11/1024; //gives 11 octaves range 0.01Hz to 10Hz
+  lfoTword_m = 1369 * pow(2.0, lfoControlVoltage); //1369 sets the lowest frequency to 0.01Hz
 }
 
 void getLfoWaveform() {
@@ -86,28 +86,28 @@ SIGNAL(TIMER2_OVF_vect) {
     lfsr ^= 0xA3000000u;
   }
   // handle LFO DDS  
-  phaccu=phaccu+tword_m; // soft DDS, phase accu with 32 bits
-  icnt=phaccu >> 24;     // use upper 8 bits for phase accu as frequency information
+  lfoPhaccu += lfoTword_m; // increment phase accumulator
+  lfoCnt=lfoPhaccu >> 24;  // use upper 8 bits for phase accu as frequency information
   switch (lfoWaveform) {
     case RAMP:
-      OCR2A = icnt;
+      OCR2A = lfoCnt;
       break;
     case SAW:
-      OCR2A = 255 - icnt;
+      OCR2A = 255 - lfoCnt;
       break;
     case TRI:
-      if (icnt & 0x80) {
-        OCR2A = 254 - ((icnt & 0x7F) << 1); //ramp down
+      if (lfoCnt & 0x80) {
+        OCR2A = 254 - ((lfoCnt & 0x7F) << 1); //ramp down
       } else {
-        OCR2A = icnt << 1; //ramp up
+        OCR2A = lfoCnt << 1; //ramp up
       }
       break;
     case SINE:
       // sine wave from table
-      OCR2A = pgm_read_byte_near(sine256 + icnt);
+      OCR2A = pgm_read_byte_near(sine256 + lfoCnt);
       break;
     case SQR:
-      if (icnt & 0x80) {
+      if (lfoCnt & 0x80) {
         OCR2A = 255;
       } else {
         OCR2A = 0;
