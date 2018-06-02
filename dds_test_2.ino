@@ -1,11 +1,13 @@
 /*
  Test code for a DDS based LFO
+ generates noise at the same time
  */
 #include <avr/pgmspace.h>
 #include <avr/io.h> 
 #include <avr/interrupt.h>
 #define DDS_MULT_FACTOR 1369 // makes the lowest frequency 0.01Hz
-
+#define NOISE_PIN 8
+uint32_t lfsr = 1; //32 bit LFSR, must be non-zero to start
 
 // table of 256 sine values / one sine period / stored in flash memory
 const char sine256[] PROGMEM = {
@@ -26,20 +28,20 @@ enum lfoWaveTypes {
   RAMP,
   SAW,
   TRI,
-  SINE
+  SINE,
+  SQR
 };
 lfoWaveTypes lfoWaveform;
 
 void setup() {
   pinMode(11, OUTPUT); //PWM output
   pinMode(7, OUTPUT); // test pin
-  tword_m = 1369;
+  pinMode(NOISE_PIN, OUTPUT);
   // timer 2 phase accurate PWM, no prescaling, non inverting mode channel A
   TCCR2A = _BV(COM2A1) | _BV(WGM20);
   TCCR2B = _BV(CS20);
   // timer 2 interrupt
   TIMSK2 = _BV(TOIE2);
-
 }
 
 void getLfoFreq() {
@@ -51,14 +53,16 @@ void getLfoFreq() {
 void getLfoWaveform() {
   // read ADC to get the LFO wave type
   int adcVal = analogRead(1);
-  if (adcVal < 256) {
+  if (adcVal < 128) {
     lfoWaveform = TRI;
-  } else if (adcVal < 512) {
+  } else if (adcVal < 384) {
     lfoWaveform = RAMP;
-  } else if (adcVal < 768) {
+  } else if (adcVal < 640) {
     lfoWaveform = SAW;
-  } else {
+  } else if (adcVal < 896) {
     lfoWaveform = SINE;
+  } else {
+    lfoWaveform = SQR;
   }
 }
 
@@ -69,6 +73,19 @@ void loop() {
 
 SIGNAL(TIMER2_OVF_vect) {
   PORTD = 0x80; // to test timing
+  // handle noise signal. Set or clear noise pin PB0 (digital pin 8)
+  unsigned lsb = lfsr & 1;
+  if (lsb) {
+    PORTB |= 1;
+  } else {
+    PORTB &= ~1;
+  }
+  // advance LFSR
+  lfsr >>= 1;
+  if (lsb) {
+    lfsr ^= 0xA3000000u;
+  }
+  // handle LFO DDS  
   phaccu=phaccu+tword_m; // soft DDS, phase accu with 32 bits
   icnt=phaccu >> 24;     // use upper 8 bits for phase accu as frequency information
   switch (lfoWaveform) {
@@ -88,6 +105,13 @@ SIGNAL(TIMER2_OVF_vect) {
     case SINE:
       // sine wave from table
       OCR2A = pgm_read_byte_near(sine256 + icnt);
+      break;
+    case SQR:
+      if (icnt & 0x80) {
+        OCR2A = 255;
+      } else {
+        OCR2A = 0;
+      }
       break;
     default:
       break;
