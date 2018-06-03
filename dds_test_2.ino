@@ -1,5 +1,5 @@
 /*
- Test code for a DDS based LFO
+ Test code for a DDS based LFO + Envelope generator
  generates noise at the same time
  */
 #include <avr/pgmspace.h>
@@ -9,7 +9,7 @@
 uint32_t lfsr = 1; //32 bit LFSR, must be non-zero to start
 
 // table of 256 sine values / one sine period / stored in flash memory
-const char sine256[] PROGMEM = {
+const char sineTable[] PROGMEM = {
   127,130,133,136,139,143,146,149,152,155,158,161,164,167,170,173,176,178,181,184,187,190,192,195,198,200,203,205,208,210,212,215,217,219,221,223,225,227,229,231,233,234,236,238,239,240,
   242,243,244,245,247,248,249,249,250,251,252,252,253,253,253,254,254,254,254,254,254,254,253,253,253,252,252,251,250,249,249,248,247,245,244,243,242,240,239,238,236,234,233,231,229,227,225,223,
   221,219,217,215,212,210,208,205,203,200,198,195,192,190,187,184,181,178,176,173,170,167,164,161,158,155,152,149,146,143,139,136,133,130,127,124,121,118,115,111,108,105,102,99,96,93,90,87,84,81,78,
@@ -17,13 +17,23 @@ const char sine256[] PROGMEM = {
   33,35,37,39,42,44,46,49,51,54,56,59,62,64,67,70,73,76,78,81,84,87,90,93,96,99,102,105,108,111,115,118,121,124
 };
 
+// table of exponential rise, might not be needed
+const char expTable[] PROGMEM = {
+  0,5,10,15,19,24,28,33,37,41,45,49,53,57,61,65,68,72,76,79,82,86,89,92,95,99,102,105,107,110,113,116,119,121,124,126,129,131,134,136,138,141,143,145,147,149,151,153,155,157,159,161,163,164,166,168,
+  170,171,173,174,176,178,179,181,182,183,185,186,187,189,190,191,193,194,195,196,197,198,199,200,202,203,204,205,206,207,207,208,209,210,211,212,213,214,214,215,216,217,217,218,219,220,220,221,222,
+  222,223,223,224,225,225,226,226,227,227,228,229,229,230,230,231,231,231,232,232,233,233,234,234,234,235,235,236,236,236,237,237,237,238,238,238,239,239,239,240,240,240,241,241,241,241,242,242,242,
+  242,243,243,243,243,244,244,244,244,244,245,245,245,245,245,246,246,246,246,246,246,247,247,247,247,247,247,248,248,248,248,248,248,248,249,249,249,249,249,249,249,249,249,250,250,250,250,250,250,
+  250,250,250,250,251,251,251,251,251,251,251,251,251,251,251,251,251,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,253,253,253,253,253,253,253,253,253,253,253,253,253,253,253,
+  253,253,253,253
+};
+
+
 // LFO stuff
 uint32_t lfoPhaccu;   // phase accumulator
 uint32_t lfoTword_m;  // dds tuning word m
 uint8_t lfoCnt;      // var inside interrupt
 
 float lfoControlVoltage;
-float lfoFreq;
 enum lfoWaveTypes {
   RAMP,
   SAW,
@@ -33,15 +43,37 @@ enum lfoWaveTypes {
 };
 lfoWaveTypes lfoWaveform;
 
+// envelope stuff
+uint32_t envPhaccu;   // phase accumulator
+uint32_t envTword_m;  // dds tuning word m
+uint8_t envCnt;      // var inside interrupt
+
+float envControlVoltage;
+float envFreq;
+
+enum envStates {
+  WAIT,
+  ATTACK,
+  SUSTAIN,
+  RELEASE
+};
+envStates envState;
+
 void setup() {
-  pinMode(11, OUTPUT); //PWM output
-  pinMode(7, OUTPUT); // test pin
+  pinMode(11, OUTPUT); //PWM OC2A LFO output, note: conflicts with SPI MOSI, need to change this
+  pinMode(3, OUTPUT); //PWM OC2B Envelope output
+  pinMode(7, OUTPUT); // test pin for timing only, temporary
   pinMode(NOISE_PIN, OUTPUT);
-  // timer 2 phase accurate PWM, no prescaling, non inverting mode channel A
-  TCCR2A = _BV(COM2A1) | _BV(WGM20);
+  // timer 2 phase accurate PWM, no prescaling, non inverting mode channels A & B used
+  TCCR2A = _BV(COM2A1) | _BV(COM2B1)| _BV(WGM20);
   TCCR2B = _BV(CS20);
   // timer 2 interrupt
   TIMSK2 = _BV(TOIE2);
+  // envelope stuff
+  envState = WAIT;
+  envPhaccu = 0;
+  OCR2B = 0;
+  Serial.begin(9600); // for test instead of midi
 }
 
 void getLfoFreq() {
@@ -66,9 +98,24 @@ void getLfoWaveform() {
   }
 }
 
+void getEnvAttack() {
+  // read ADC to calculate the required DDS tuning word, log scale between 1ms and 10s approx
+  float envControlVoltage = analogRead(2) * 13/1024; //gives 13 octaves range 1ms to 10s
+  envTword_m = 13690 * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s
+}
+
 void loop() {
   getLfoFreq();
   getLfoWaveform();
+  getEnvAttack();
+  if (Serial.available() > 0) {
+    char rx_byte = Serial.read();
+    if (rx_byte == '1') {
+      envState = ATTACK;
+    } else if (rx_byte == '2') {
+      envState = RELEASE;
+    }
+  }
 }
 
 SIGNAL(TIMER2_OVF_vect) {
@@ -87,7 +134,7 @@ SIGNAL(TIMER2_OVF_vect) {
   }
   // handle LFO DDS  
   lfoPhaccu += lfoTword_m; // increment phase accumulator
-  lfoCnt=lfoPhaccu >> 24;  // use upper 8 bits for phase accu as frequency information
+  lfoCnt = lfoPhaccu >> 24;  // use upper 8 bits for phase accu as frequency information
   switch (lfoWaveform) {
     case RAMP:
       OCR2A = lfoCnt;
@@ -104,7 +151,7 @@ SIGNAL(TIMER2_OVF_vect) {
       break;
     case SINE:
       // sine wave from table
-      OCR2A = pgm_read_byte_near(sine256 + lfoCnt);
+      OCR2A = pgm_read_byte_near(sineTable + lfoCnt);
       break;
     case SQR:
       if (lfoCnt & 0x80) {
@@ -112,6 +159,33 @@ SIGNAL(TIMER2_OVF_vect) {
       } else {
         OCR2A = 0;
       }
+      break;
+    default:
+      break;
+  }
+  // handle Envelope DDS
+  switch (envState) {
+    case WAIT:
+      envPhaccu = 0; // clear the accumulator
+      break;
+    case ATTACK:
+      envPhaccu += envTword_m; // increment phase accumulator
+      envCnt = envPhaccu >> 24;  // use upper 8 bits for phase accu as frequency information
+      if (envCnt == 255) {
+        envState = SUSTAIN; // end of attack stage
+      }
+      OCR2B = pgm_read_byte_near(expTable + envCnt);
+      break;
+    case SUSTAIN:
+      envPhaccu = 0; // clear the accumulator
+      break;
+    case RELEASE:
+      envPhaccu += envTword_m; // increment phase accumulator
+      envCnt = envPhaccu >> 24;  // use upper 8 bits for phase accu as frequency information
+      if (envCnt == 255) {
+        envState = WAIT; // end of release stage
+      }
+      OCR2B = 255 - pgm_read_byte_near(expTable + envCnt);
       break;
     default:
       break;
