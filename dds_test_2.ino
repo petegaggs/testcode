@@ -31,7 +31,7 @@ const char expTable[] PROGMEM = {
 // LFO stuff
 uint32_t lfoPhaccu;   // phase accumulator
 uint32_t lfoTword_m;  // dds tuning word m
-uint8_t lfoCnt;      // var inside interrupt
+uint8_t lfoCnt;      // top 8 bits of accum is index into table
 
 float lfoControlVoltage;
 enum lfoWaveTypes {
@@ -46,15 +46,19 @@ lfoWaveTypes lfoWaveform;
 // envelope stuff
 uint32_t envPhaccu;   // phase accumulator
 uint32_t envTword_m;  // dds tuning word m
-uint8_t envCnt;      // var inside interrupt
-
+uint8_t envCnt;      // top 8 bits of accum is index into table
+uint8_t lastEnvCnt;
+uint8_t envAttackLevel; // the current level of envelope during attack stage
+uint8_t envReleaseLevel; // the current level of envelope during release stage
+uint8_t envMultFactor; // multiplication factor to account for release starting before attack complete and visa versa
 float envControlVoltage;
-float envFreq;
 
 enum envStates {
   WAIT,
+  START_ATTACK,
   ATTACK,
   SUSTAIN,
+  START_RELEASE,
   RELEASE
 };
 envStates envState;
@@ -72,6 +76,7 @@ void setup() {
   // envelope stuff
   envState = WAIT;
   envPhaccu = 0;
+  lastEnvCnt = 0;
   OCR2B = 0;
   Serial.begin(9600); // for test instead of midi
 }
@@ -100,7 +105,7 @@ void getLfoWaveform() {
 
 void getEnvAttack() {
   // read ADC to calculate the required DDS tuning word, log scale between 1ms and 10s approx
-  float envControlVoltage = analogRead(2) * 13/1024; //gives 13 octaves range 1ms to 10s
+  float envControlVoltage = (1023 - analogRead(2)) * 13/1024; //gives 13 octaves range 1ms to 10s
   envTword_m = 13690 * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s
 }
 
@@ -111,9 +116,9 @@ void loop() {
   if (Serial.available() > 0) {
     char rx_byte = Serial.read();
     if (rx_byte == '1') {
-      envState = ATTACK;
+      envState = START_ATTACK;
     } else if (rx_byte == '2') {
-      envState = RELEASE;
+      envState = START_RELEASE;
     }
   }
 }
@@ -167,25 +172,49 @@ SIGNAL(TIMER2_OVF_vect) {
   switch (envState) {
     case WAIT:
       envPhaccu = 0; // clear the accumulator
+      lastEnvCnt = 0;
+      envReleaseLevel = 0;
+      OCR2B = 0;
+      break;
+    case START_ATTACK:
+      envPhaccu = 0; // clear the accumulator
+      lastEnvCnt = 0;
+      envMultFactor = 255 - envReleaseLevel;
+      envState = ATTACK;
       break;
     case ATTACK:
       envPhaccu += envTword_m; // increment phase accumulator
-      envCnt = envPhaccu >> 24;  // use upper 8 bits for phase accu as frequency information
-      if (envCnt == 255) {
-        envState = SUSTAIN; // end of attack stage
+      envCnt = envPhaccu >> 24;  // use upper 8 bits as index into table
+      if (envCnt < lastEnvCnt) {
+        envState = SUSTAIN; // end of attack stage when counter wraps
+      } else {
+        envAttackLevel = ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8) + envReleaseLevel;
+        OCR2B = envAttackLevel;
+        lastEnvCnt = envCnt;
       }
-      OCR2B = pgm_read_byte_near(expTable + envCnt);
       break;
     case SUSTAIN:
       envPhaccu = 0; // clear the accumulator
+      lastEnvCnt = 0;
+      envAttackLevel = 255;
+      OCR2B = 255;
+      break;
+    case START_RELEASE:
+      envPhaccu = 0; // clear the accumulator
+      lastEnvCnt = 0;
+      envMultFactor = envAttackLevel;
+      envState = RELEASE;
       break;
     case RELEASE:
       envPhaccu += envTword_m; // increment phase accumulator
-      envCnt = envPhaccu >> 24;  // use upper 8 bits for phase accu as frequency information
-      if (envCnt == 255) {
-        envState = WAIT; // end of release stage
+      envCnt = envPhaccu >> 24;  // use upper 8 bits as index into table
+      if (envCnt < lastEnvCnt) {
+        envState = WAIT; // end of release stage when counter wraps
+      } else {
+        envReleaseLevel = envAttackLevel - ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8);
+        OCR2B = envReleaseLevel;
+        lastEnvCnt = envCnt;
       }
-      OCR2B = 255 - pgm_read_byte_near(expTable + envCnt);
       break;
     default:
       break;
