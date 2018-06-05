@@ -6,6 +6,11 @@
 #include <avr/io.h> 
 #include <avr/interrupt.h>
 #define NOISE_PIN 8
+#define LFO_PWM OCR1A
+#define LFO_PWM_PIN 9
+#define ENV_PWM OCR1B
+#define ENV_PWM_PIN 10
+
 uint32_t lfsr = 1; //32 bit LFSR, must be non-zero to start
 
 // table of 256 sine values / one sine period / stored in flash memory
@@ -64,20 +69,19 @@ enum envStates {
 envStates envState;
 
 void setup() {
-  pinMode(11, OUTPUT); //PWM OC2A LFO output, note: conflicts with SPI MOSI, need to change this
-  pinMode(3, OUTPUT); //PWM OC2B Envelope output
+  pinMode(LFO_PWM_PIN, OUTPUT);
+  pinMode(ENV_PWM_PIN, OUTPUT); //PWM OC2B Envelope output
   pinMode(7, OUTPUT); // test pin for timing only, temporary
   pinMode(NOISE_PIN, OUTPUT);
-  // timer 2 phase accurate PWM, no prescaling, non inverting mode channels A & B used
-  TCCR2A = _BV(COM2A1) | _BV(COM2B1)| _BV(WGM20);
-  TCCR2B = _BV(CS20);
-  // timer 2 interrupt
-  TIMSK2 = _BV(TOIE2);
+  // timer 1 phase accurate PWM 8 bit, no prescaling, non inverting mode channels A & B used
+  TCCR1A = _BV(COM1A1) | _BV(COM1B1)| _BV(WGM10);
+  TCCR1B = _BV(CS10);
+  // timer 1 interrupt
+  TIMSK1 = _BV(TOIE1);
   // envelope stuff
   envState = WAIT;
   envPhaccu = 0;
   lastEnvCnt = 0;
-  OCR2B = 0;
   Serial.begin(9600); // for test instead of midi
 }
 
@@ -123,7 +127,7 @@ void loop() {
   }
 }
 
-SIGNAL(TIMER2_OVF_vect) {
+SIGNAL(TIMER1_OVF_vect) {
   PORTD = 0x80; // to test timing
   // handle noise signal. Set or clear noise pin PB0 (digital pin 8)
   unsigned lsb = lfsr & 1;
@@ -142,27 +146,27 @@ SIGNAL(TIMER2_OVF_vect) {
   lfoCnt = lfoPhaccu >> 24;  // use upper 8 bits for phase accu as frequency information
   switch (lfoWaveform) {
     case RAMP:
-      OCR2A = lfoCnt;
+      LFO_PWM = lfoCnt;
       break;
     case SAW:
-      OCR2A = 255 - lfoCnt;
+      LFO_PWM = 255 - lfoCnt;
       break;
     case TRI:
       if (lfoCnt & 0x80) {
-        OCR2A = 254 - ((lfoCnt & 0x7F) << 1); //ramp down
+        LFO_PWM = 254 - ((lfoCnt & 0x7F) << 1); //ramp down
       } else {
-        OCR2A = lfoCnt << 1; //ramp up
+        LFO_PWM = lfoCnt << 1; //ramp up
       }
       break;
     case SINE:
       // sine wave from table
-      OCR2A = pgm_read_byte_near(sineTable + lfoCnt);
+      LFO_PWM = pgm_read_byte_near(sineTable + lfoCnt);
       break;
     case SQR:
       if (lfoCnt & 0x80) {
-        OCR2A = 255;
+        LFO_PWM = 255;
       } else {
-        OCR2A = 0;
+        LFO_PWM = 0;
       }
       break;
     default:
@@ -174,7 +178,7 @@ SIGNAL(TIMER2_OVF_vect) {
       envPhaccu = 0; // clear the accumulator
       lastEnvCnt = 0;
       envReleaseLevel = 0;
-      OCR2B = 0;
+      ENV_PWM = 0;
       break;
     case START_ATTACK:
       envPhaccu = 0; // clear the accumulator
@@ -189,7 +193,7 @@ SIGNAL(TIMER2_OVF_vect) {
         envState = SUSTAIN; // end of attack stage when counter wraps
       } else {
         envAttackLevel = ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8) + envReleaseLevel;
-        OCR2B = envAttackLevel;
+        ENV_PWM = envAttackLevel;
         lastEnvCnt = envCnt;
       }
       break;
@@ -197,7 +201,7 @@ SIGNAL(TIMER2_OVF_vect) {
       envPhaccu = 0; // clear the accumulator
       lastEnvCnt = 0;
       envAttackLevel = 255;
-      OCR2B = 255;
+      ENV_PWM = 255;
       break;
     case START_RELEASE:
       envPhaccu = 0; // clear the accumulator
@@ -212,7 +216,7 @@ SIGNAL(TIMER2_OVF_vect) {
         envState = WAIT; // end of release stage when counter wraps
       } else {
         envReleaseLevel = envAttackLevel - ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8);
-        OCR2B = envReleaseLevel;
+        ENV_PWM = envReleaseLevel;
         lastEnvCnt = envCnt;
       }
       break;
